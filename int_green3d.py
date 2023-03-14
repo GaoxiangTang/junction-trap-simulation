@@ -301,34 +301,37 @@ if __name__ == '__main__':
     import matplotlib.pyplot as plt
     import time
     # test if the result is consistent with Matlab.
-    # eng = engine.start_matlab()
-    # s = eng.genpath('matlab')
-    # eng.addpath(s, nargout=0)
-    # errors = []
-    # for i in range(1000):
-    #     V = np.random.uniform(-50, 50, (3, 3))
-    #     Pglo = np.random.uniform(-50, 50, (5, 3))
-    #     I_m = eng.int_green3d_tri(matlab.double(Pglo), matlab.double(V))
-    #     I, Igrad = int_green3d_tri(Pglo, V)
-    #     # print(Igrad.shape)
-    #     errors.append((I - I_m).mean())
-    # plt.plot(errors)
-    # plt.show()
+    eng = engine.start_matlab()
+    s = eng.genpath('matlab')
+    eng.addpath(s, nargout=0)
+    errors, errors_grad = [], []
+    for i in range(1000):
+        V = np.random.uniform(-50, 50, (3, 3))
+        Pglo = np.random.uniform(-50, 50, (5, 3))
+        I_m, Igrad_m = eng.int_green3d_tri(matlab.double(Pglo.tolist()), matlab.double(V.tolist()), nargout=2)
+        I, Igrad = int_green3d_tri(Pglo, V)
+        # print(Igrad.shape)
+        errors.append((I_m - I).mean())
+        errors_grad.append((Igrad_m - Igrad).mean())
+    plt.plot(errors)
+    plt.show()
+    plt.plot(errors_grad)
+    plt.show()
 
-    V = np.random.uniform(-50, 50, (200, 3, 3))
-    Pglo = np.random.uniform(-50, 50, (5000, 3))
+    # V = np.random.uniform(-50, 50, (200, 3, 3))
+    # Pglo = np.random.uniform(-50, 50, (5000, 3))
 
-    start = time.time()
-    I, Igrad = int_green3d_vectorized(Pglo, V)
-    end = time.time()
-    print(end - start)
+    # start = time.time()
+    # I, Igrad = int_green3d_vectorized(Pglo, V)
+    # end = time.time()
+    # print(end - start)
 
-    start = time.time()
-    Igrads = []
-    for v in V:
-        I, Igrad1 = int_green3d_tri(Pglo, v)
-        Igrads.append(Igrad1)
-    end = time.time()
-    print(end - start)
+    # start = time.time()
+    # Igrads = []
+    # for v in V:
+    #     I, Igrad1 = int_green3d_tri(Pglo, v)
+    #     Igrads.append(Igrad1)
+    # end = time.time()
+    # print(end - start)
 
-    print(Igrad - np.array(Igrads))
+    # print(Igrad - np.array(Igrads))
