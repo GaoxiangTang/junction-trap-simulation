@@ -9,7 +9,7 @@ def get_mesh(model):
 
 def gauss_electrostatic_propagator(Pglo, V):
     I, Igrad = int_green3d_tri_multiple(Pglo, V)
-    return I / 4 / np.pi, Igrad / 4 / np.pi * 1e3
+    return I / 4 / np.pi, Igrad / 4 / np.pi
 
 def get_charge_basis(model, regenerate=False):
 
