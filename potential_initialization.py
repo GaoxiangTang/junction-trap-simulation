@@ -4,12 +4,18 @@ from tqdm import tqdm
 import matplotlib.pyplot as plt
 import os
 
+q = 1.6e-19
+m = 0.171/6.02e23
+omega_rf = 2 * np.pi * 30e6
+V_rf = 170
+
+
 def get_mesh(model):
     return trimesh.load_mesh("models/%s.stl" % model)
 
 def gauss_electrostatic_propagator(Pglo, V):
-    I, Igrad = int_green3d_tri_multiple(Pglo, V)
-    return I / 4 / np.pi, Igrad / 4 / np.pi
+    I, Igrad = int_green3d_vectorized(Pglo, V)
+    return I / 4 / np.pi, Igrad / 4 / np.pi * 1e3
 
 def get_charge_basis(model, regenerate=False):
 
@@ -35,7 +41,7 @@ def get_charge_basis(model, regenerate=False):
     np.save(cb_path, charge_basis)
     return charge_basis
 
-def get_potential_basis(model, PSCoef=None, field_points=None, regenerate=False):
+def get_potential_basis(model, PSCoef=None, field_points=None, regenerate=False, rf_id=0):
 
     pb_path = "data/%s_potential.npz" % model
     if os.path.exists(pb_path) and not regenerate:
@@ -43,16 +49,12 @@ def get_potential_basis(model, PSCoef=None, field_points=None, regenerate=False)
         return data["potential_basis"], data["pseudo_potential"].astype(np.longdouble)
 
     if PSCoef is None:
-        q = 1.6e-19
-        m = 0.171/6.02e23
-        omega_rf = 2 * np.pi * 30e6
-        V_rf = 170
         PSCoef = (q / (4 * m * omega_rf ** 2)) * V_rf ** 2
     
     mesh = trimesh.load_mesh("models/%s.stl" % model)
     nov, nof, nop = len(mesh.vertices), len(mesh.faces), len( trimesh.graph.connected_components(mesh.edges))
 
-    charge_basis = get_charge_basis(mesh)
+    charge_basis = get_charge_basis(model)
 
     if field_points is None:
         field_points = np.mgrid[-1:1:0.005, -0.1:0.1:0.005, 0.05:0.10:0.005]
@@ -63,7 +65,7 @@ def get_potential_basis(model, PSCoef=None, field_points=None, regenerate=False)
     print("Calculating propagators")
     potential_propagators, grad_propagators = gauss_electrostatic_propagator(field_points, mesh.triangles, require_grad=True)
     grad_propagators = np.transpose(grad_propagators, (2, 0, 1))
-    field_points_grad = grad_propagators @ charge_basis[0]
+    field_points_grad = grad_propagators @ charge_basis[rf_id]
     pseudo_potential = ((field_points_grad ** 2).sum(axis=0) * PSCoef).reshape(grid)
     potential_basis = (potential_propagators @ charge_basis.T).reshape(list(grid) + [nop])
 
