@@ -16,31 +16,33 @@ def init_analytic_properties(interp):
            lambda x: np.array([[func(x) for func in col] for col in hess]).reshape((3, 3)) * 1e6,\
 
 
-def get_pseudo_potential_interpolation(model, srange=[[-1, 1], [-0.1, 0.1], [0.05, 0.1]], stepsize=0.005, ppi=None):
-    if ppi is not None and model in ppi:
-        return ppi[model]
-    pb, pp = get_potential_basis(model)
+def get_pseudo_potential_interpolation(model, pscoef, srange, stepsize, ppi=None):
+    text = "range_" + str(srange) + "stepsize_" + str(stepsize)
+    # if ppi is not None and text in ppi:
+    #     return ppi[model]
     field_points = get_field_points(srange, stepsize)
+    pb, pp = get_potential_basis(model, field_points, text=text)
+    pp *= pscoef
+    # print(pp)
     interp = ndsplines.make_interp_spline(field_points, pp)
-    ppi[model] = (interp, *init_analytic_properties(interp))
-    return ppi[model]
+    return interp, *init_analytic_properties(interp)
 # field_points.shape, pp.shape
 
-def get_potential_basis_interpolation(model, srange=[[-1, 1], [-0.1, 0.1], [0.05, 0.1]], stepsize=0.005, pbi=None):
+def get_potential_basis_interpolation(model, srange, stepsize, pbi=None, regenerate=False):
     
-
+    text = "range_" + str(srange) + "stepsize_" + str(stepsize)
     def list_function(function_list):
         
         def result_function(input):
             return np.array([function(input) for function in function_list])
 
         return result_function
-    if pbi is not None and model in pbi:
-        return pbi[model]
-
-    pb, pp = get_potential_basis(model)
-
+    if pbi is not None and text in pbi:
+        return pbi[text]
+    
     field_points = get_field_points(srange, stepsize)
+    pb, pp = get_potential_basis(model, field_points=field_points, regenerate=regenerate, text=text)
+
     interp, jac, hess, jac_SI, hess_SI = [], [], [], [], []
     for i in tqdm(range(pb.shape[-1])):
         itp = ndsplines.make_interp_spline(field_points, pb[...,i])
@@ -50,11 +52,11 @@ def get_potential_basis_interpolation(model, srange=[[-1, 1], [-0.1, 0.1], [0.05
         hess.append(h)
         jac_SI.append(jsi)
         hess_SI.append(hsi)
-    pbi[model] = (list_function(interp), list_function(jac), list_function(hess)\
+    pbi[text] = (list_function(interp), list_function(jac), list_function(hess)\
                 , list_function(jac_SI), list_function(hess_SI))
-    return pbi[model]
+    return pbi[text]
 
-def find_radial_minimum(interp, grad=None, hessian=None, srange=[[-1, 1], [-0.1, 0.1], [0.05, 0.1]], stepsize=0.005, plot=False):
+def find_radial_minimum(interp, grad, srange, stepsize, plot=False):
     xtick, ytick, ztick = get_field_point_ticks(srange, stepsize=stepsize)
     locations = []
     for x in tqdm(xtick):
@@ -72,41 +74,69 @@ def find_radial_minimum(interp, grad=None, hessian=None, srange=[[-1, 1], [-0.1,
     return xtick, locations
 
 
-def get_rf_null(pseudo_interp, pseudo_jac):
-    xtick, locations = find_radial_minimum(pseudo_interp, grad=pseudo_jac)
+def get_rf_null(pseudo_interp, pseudo_jac, srange, stepsize):
+    xtick, locations = find_radial_minimum(pseudo_interp, pseudo_jac, srange, stepsize)
     return ndsplines.make_interp_spline(xtick, locations)
 
 
 
 class trap_model:
-    def __init__(self, name, shuttle_range=[[-1, 1], [-0.1, 0.1], [0.05, 0.1]], pbi=None, ppi=None) -> None:
+    def __init__(self, name, V_rf, omega_rf, shuttle_range, stepsize, pbi=None, ppi=None, regenerate=False) -> None:
+        print("这tqdm有大病")
         data = np.load("models\%s.npz" % name, allow_pickle=True)
+        self.name = name
         self.pairs = data["pairs"].item()
         self.npairs = len(self.pairs)
         self.dual = dict()
         self.idx2name = dict()
+        self.shuttle_range = shuttle_range
+        self.stepsize = stepsize
         for k in self.pairs:
             p1, p2 = self.pairs[k]
             self.dual[p1] = p2
             self.dual[p2] = p1
             self.idx2name[p1] = self.idx2name[p2] = k
-            
         self.idx2sector = data["idx2sector"]
         self.sector2idx = defaultdict(list)
         for idx, sector in enumerate(self.idx2sector):
             self.sector2idx[sector].append(idx)
-        self.shuttle_range = shuttle_range
-        self.pseudo_interp, self.pseudo_jac, self.pseudo_hess, self.pseudo_jac_SI, self.pseudo_hess_SI  \
-            = get_pseudo_potential_interpolation(name, srange=shuttle_range, ppi=ppi)
-        self.interp, self.jac, self.hess, self.jac_SI, self.hess_SI = get_potential_basis_interpolation(name, srange=shuttle_range, pbi=pbi)  
-        self.rf_null = get_rf_null(self.pseudo_interp, self.pseudo_jac)
+        self.interp, self.jac, self.hess, self.jac_SI, self.hess_SI = get_potential_basis_interpolation(name, srange=shuttle_range, stepsize=stepsize, pbi=pbi, regenerate=regenerate)  
+        self.reset_rf(V_rf, omega_rf)
+        self.rf_null = get_rf_null(self.pseudo_interp, self.pseudo_jac, shuttle_range, stepsize)
         self.dc_sectors = data["dc_sectors"]
         
         self.weight = [100, 10000, 1000, 1000, 300, 1, 1, 100, 200, 200]
         self.mesh = display.get_mesh(name)
         self.nparts = len(trimesh.graph.connected_components(self.mesh.edges))
 
-    def plot(self, electrodode=None, sector=None):
+    def reset_rf(self, V_rf, omega_rf):
+        self.pscoef = (q / (4 * m * omega_rf ** 2)) * V_rf ** 2
+        self.pseudo_interp, self.pseudo_jac, self.pseudo_hess, self.pseudo_jac_SI, self.pseudo_hess_SI  \
+            = get_pseudo_potential_interpolation(self.name, self.pscoef, srange=self.shuttle_range, stepsize=self.stepsize)
+
+    def depth_of_trap(self, x, ploting=False):
+        p = self.rf_null_point(x)
+        zrange = np.linspace(*self.shuttle_range[2], 100)
+        potential_list = [self.potential(np.zeros(self.nparts), [p[0], p[1], z]) for z in zrange]
+        #np.zeros(94)长度94的0向量；p[0]和p[1]为x=0.55截面赝势零点的xy坐标，p[2]赝势零点z坐标；
+        opt = minimize(lambda z: -self.potential(np.zeros(self.nparts), [p[0], p[1], z]), x0=p[2] + 0.005, bounds=[(p[2], 0.2)])
+        if ploting is True:
+            plt.plot(zrange, potential_list)
+            plt.xlabel("z(mm)")
+            plt.ylabel("potential")
+            plt.vlines(x=p[2], ymin=-0.1, ymax=0.5, label="rf null", color="orange", linestyles='dashed') #p[2]赝势零点z坐标，虚线位置不对应呀？；
+            plt.vlines(x=opt.x, ymin=-0.1, ymax=0.5, label="escape point", color="red", linestyles='dashed')
+            plt.title("x=%fmm" % x)
+            plt.legend()
+        return opt.x[0] - p[2]
+
+
+    def plot(self, part_id=None, electrodode=None, sector=None):
+        if part_id is not None:
+            if isinstance(part_id, int):
+                display.part(self.mesh, part_id)
+            else:
+                display.part(self.mesh, [e for e in part_id])
         if electrodode is not None:
             if isinstance(electrodode, str):
                 display.part(self.mesh, self.pairs[electrodode])
@@ -120,9 +150,9 @@ class trap_model:
 
     def plot_slice(self, voltage, x=None, z=None, ax=None):
         if x is not None:
-            display.potential_slicex(self.shuttle_range, x,  interp=lambda xx: self.potential(voltage, xx), ax=ax)
+            display.potential_slicex(self.shuttle_range, self.stepsize, x,  interp=lambda xx: self.potential(voltage, xx), ax=ax)
         if z is not None:
-            display.potential_slicez(self.shuttle_range, z,  interp=lambda xx: self.potential(voltage, xx), ax=ax)
+            display.potential_slicez(self.shuttle_range, self.stepsize, z,  interp=lambda xx: self.potential(voltage, xx), ax=ax)
 
     def rf_null_point(self, x):
         if isinstance(x, (list, np.ndarray)):
@@ -161,7 +191,7 @@ class trap_model:
         
     
     def loss_function(self, point, util_indices=None, all_indices=None, method="profile target loss", 
-                      omega=[0.5, 3, 3], w=None, confine_voltage=5, paired=True, compensate_z=True):
+                      omega=[0.5, 3, 3], w=None, confine_voltage=5, paired=True, compensate_z=True, rotation=np.eye(3)):
 
         def oscillator_energy(voltage):
             E = (jac * voltage[:, None]).sum(axis=0) + pseudo_jac
@@ -174,7 +204,11 @@ class trap_model:
             E = (jac * voltage[:, None]).sum(axis=0) + pseudo_jac
             V = (interp * voltage[:, None]).sum(axis=0) + pseudo_interp
             hessian = (hess * voltage[:, None, None]).sum(axis=0) + pseudo_hess
+            # print(hessian.shape)
+            hessian = rotation.T @ hessian @ rotation
+            # print(hessian.shape)
             P = np.array([V[0], E[0], E[1], E[2], hessian[0, 0], hessian[1, 1], hessian[2, 2], hessian[0, 1], hessian[0, 2], hessian[1, 2]])
+            # print(P.shape)
             omega = (np.array([hessian[0, 0], hessian[1, 1], hessian[2, 2]]) / 1e6 * q / m) ** 0.5 / (2 * np.pi)
             if display:
                 print(P - target)
@@ -187,7 +221,7 @@ class trap_model:
         
         interp, jac, hess, pseudo_interp, pseudo_jac, pseudo_hess = self.field_properties(point)
 
-        null_voltage = np.zeros(94)
+        null_voltage = np.zeros(self.nparts)
         null_voltage[all_indices] = confine_voltage
         null_voltage[util_indices] = 0
         null_voltage[self.get_dual(util_indices)] = 0
@@ -236,7 +270,7 @@ class trap_model:
     #         return None
     #     interp, jac, hess, pseudo_interp, pseudo_jac, pseudo_hess = self.field_properties(point)
 
-    #     null_voltage = np.ones(94) * confine_voltage
+    #     null_voltage = np.ones(self.nparts) * confine_voltage
     #     null_voltage[indices] = 0
     #     null_voltage[self.get_dual(indices)] = 0
 
@@ -288,16 +322,53 @@ class trap_model:
         elif use_sectors is not None:
             indices = [idx for sector in use_sectors for idx in self.sector2idx[sector]]
         else:
-            indices = [i for i in range(94)]
+            indices = [i for i in range(self.nparts)]
         if plot:
              display.part(self.mesh, indices)
             #  plt.scatter(point[0], point[1], point[2])
         return sorted(indices)
     
 
+    def coord_voltage(self, x, omega=[0.5, 3, 3], rotation=np.eye(3), w=None,
+                        confine_voltage=0, max_voltage=10, top_nearest=3, paired=True, use_sectors=None, message=False):
+        if use_sectors is None:
+            use_sectors = self.dc_sectors
+        if w is None:
+            w = self.weight
+        all_indices = self.get_all_from_sectors(use_sectors)
+        point = self.rf_null_point(x)
+        indices = self.get_indices(use_sectors, point, top_nearest, paired)
+        initial_guess = np.ones(len(indices)) * (confine_voltage - max_voltage) / 2
+        bounds = [(-max_voltage, confine_voltage) for guess in initial_guess]
+        opt =  minimize(self.loss_function(point, indices, all_indices, "profile target loss", \
+                                           omega, w, confine_voltage, paired, False, rotation), 
+                        x0=initial_guess,
+                        method="SLSQP",
+                        bounds=bounds,
+                        )
+        # print(opt)
+        voltage = np.zeros(self.nparts)
+        voltage[all_indices] = confine_voltage
+        voltage[indices] = opt.x
+        if paired:
+            voltage[self.get_dual(indices)] = opt.x
+        if message:
+            print("Ion location at " + str(point))
+            if paired:
+                for idx, v in zip(indices, opt.x):
+                    if abs(v) > 1e-5:
+                        print(self.idx2name[idx] + ": " + str(v) + " V")
+            else:
+                for idx, v in zip(indices, opt.x):
+                    if abs(v) > 1e-5:
+                        print("electrode " + str(idx) + ": " + str(v) + " V")
+        return point, voltage
+        # return opt
+    
+
     def optimized_voltage(self, point, util_indices, all_indices, initial_guess, bounds, method="profile target loss"\
                           , omega=[0.5, 3, 3], w=None, confine_voltage=5,\
-                            paired=True, compensate_z=True):
+                            paired=True, compensate_z=False):
 
         # if method == "oscillator energy":
         #     cons = self.OE_constraints(point, indices)
@@ -324,13 +395,15 @@ class trap_model:
                                   max_voltage=10, confine_voltage=0,
                                   paired=True, epack=None, apack=None,
                                   fix_voltage_dict=None, dynamic_selection=True, 
-                                  compensate_z=True, calc_position=False):
+                                  compensate_z=False, calc_position=False):
 
         res, voltages, grads, frequencies, psEs = [], [], [], [], []
         if calc_position:
             positions = []
         indices = None
         all_indices = self.get_all_from_sectors(use_sectors)
+        # alpha是电压随离子坐标的变化率上限，单位V/mm
+        # alpha * 输运速度 = 电压对时间的变化率上限
         deltav=alpha * (x[1] - x[0])
         for i in tqdm(x):
             point = self.rf_null_point(i)
@@ -370,9 +443,11 @@ class trap_model:
             res.append(opt_res)
             sol = opt_res.x[:-1] if compensate_z else opt_res.x
             initial_guess = sol
-
-            voltage = np.ones(94) * confine_voltage
+            
+            voltage = np.ones(self.nparts) * confine_voltage
             voltage[indices] = sol
+            if paired:
+                voltage[self.get_dual(indices)] = sol
             if compensate_z:
                 voltage[self.get_all_from_sectors(self.dc_sectors)] += opt_res.x[-1]
             
@@ -387,7 +462,7 @@ class trap_model:
         psEs = np.array(psEs)
         if plot_v:
             plt.figure(figsize=(13, 8), dpi=80)
-            for eidx in range(94):
+            for eidx in range(self.nparts):
                 if (voltages[:, eidx] != confine_voltage).any():
                     plt.plot(x, voltages[:, eidx], label="electordode %s" % self.idx2name[eidx])
             plt.legend()
@@ -440,12 +515,15 @@ class trap_model:
         guess = [guess_x, 0, 0.07]
         return minimize(func, x0=guess, tol=1e-9, method='Nelder-Mead').x
     
-    def freq(self, point, voltages):
+    def freq(self, point, voltages, rotate=False):
         hessian = self.pseudo_hess(point) + (self.hess(point) * voltages[:, None, None]).sum(axis=0)
-        eig = np.array([hessian[0, 0], hessian[1, 1], hessian[2, 2]])
-        # print(eig)
-        freq = (q * eig * 1e-6 / m) ** 0.5 / (2 * np.pi )
-        return freq
-
-
+        if rotate is False:
+            eig = np.array([hessian[0, 0], hessian[1, 1], hessian[2, 2]])
+            # print(eig)
+            freq = (q * eig * 1e-6 / m) ** 0.5 / (2 * np.pi )
+            return freq
+        else:
+            eig, eigv = np.linalg.eig(hessian)
+            freq = (q * eig * 1e-6 / m) ** 0.5 / (2 * np.pi )
+            return freq, eigv
     
