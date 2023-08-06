@@ -6,7 +6,23 @@ from collections import defaultdict
 import display
 from potential_initialization import *
 import ndsplines
+import plotly.graph_objects as go
 
+def mesh3d(mesh,**kwargs):
+    vertices = mesh.vertices
+    triangles = mesh.faces
+    x, y, z = vertices.T
+    I, J, K = triangles.T              
+    Xe = []
+    Ye = []
+    Ze = []
+    for T in vertices[triangles] :
+        Xe.extend([T[k%3][0] for k in range(4)]+[None])
+        Ye.extend([T[k%3][1] for k in range(4)]+[None])
+        Ze.extend([T[k%3][2] for k in range(4)]+[None])
+    return (go.Mesh3d(x=x,y=y,z=z,i=I,j=J,k=K,flatshading=True,showscale=False,**kwargs),)
+            #go.Scatter3d(x=Xe,y=Ye,z=Ze,mode='lines',line=dict(color='rgb(70,70,70)',width=1),name='')) 
+            
 def init_analytic_properties(interp):
     jac = [interp.derivative(i) for i in range(3)]
     hess = [[interp.derivative(i).derivative(j) for i in range(3)] for j in range(3)]
@@ -82,7 +98,7 @@ def get_rf_null(pseudo_interp, pseudo_jac, srange, stepsize):
 
 class trap_model:
     def __init__(self, name, V_rf, omega_rf, shuttle_range, stepsize, pbi=None, ppi=None, regenerate=False) -> None:
-        print("这tqdm有大病")
+        #print("这tqdm有大病")
         data = np.load("models\%s.npz" % name, allow_pickle=True)
         self.name = name
         self.pairs = data["pairs"].item()
@@ -130,23 +146,29 @@ class trap_model:
             plt.legend()
         return opt.x[0] - p[2]
 
-
     def plot(self, part_id=None, electrodode=None, sector=None):
-        if part_id is not None:
-            if isinstance(part_id, int):
-                display.part(self.mesh, part_id)
-            else:
-                display.part(self.mesh, [e for e in part_id])
+        electrodes = trimesh.graph.split(self.mesh,False)
         if electrodode is not None:
             if isinstance(electrodode, str):
-                display.part(self.mesh, self.pairs[electrodode])
-            else:
-                display.part(self.mesh, [self.pairs[e] for e in electrodode])
-        if sector is not None:
-            if isinstance(sector, int): 
-                display.part(self.mesh, self.sector2idx[sector])
-            else:
-                display.part(self.mesh, [self.sector2idx[s] for s in sector])
+                electrodode = [electrodode]
+            part_id = []
+            for e in electrodode:
+                part_id += self.pairs[e]
+        elif sector is not None:
+            if isinstance(sector, int):
+                sector = [sector]
+            part_id = []
+            for s in sector:
+                part_id += self.sector2idx[s]
+        if isinstance(part_id, int):
+            part_id = [part_id]
+        part_id = set(part_id)
+        scene = dict(aspectratio=dict(x=3,y=2,z=1),zaxis=dict(range=[0,0.1]),camera=dict(eye=dict(x=0,y=-1.5,z=3)))
+        layout = go.Layout(scene=scene,margin=dict(r=0,l=0,b=0,t=0))#,height=400)
+        data = []
+        for i in range(len(electrodes)):
+            data += mesh3d(electrodes[i],color='goldenrod' if i in part_id else 'grey',hoverinfo='name',name=str(i),opacity=1 if i in part_id else 0.5)
+        return go.Figure(data=data,layout=layout)
 
     def plot_slice(self, voltage, x=None, z=None, ax=None):
         if x is not None:

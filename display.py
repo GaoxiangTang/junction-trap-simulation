@@ -5,7 +5,6 @@ from scipy.interpolate import interpnd, RegularGridInterpolator
 import numpy as np
 from potential_initialization import *
 
-
 def potential_slicez(srange, stepsize, z, potential=None, interp=None, ax=None):
     xtick, ytick, ztick = get_field_point_ticks(srange, stepsize)
     if interp is None:
@@ -72,5 +71,4 @@ def part(mesh, part_idx=0, ):
 
     # Show the plot to the screen
     return axes
- 
 

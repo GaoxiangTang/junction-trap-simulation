@@ -33,7 +33,14 @@
 
 import numpy as np
 from numpy import log, exp, abs, arctan
-from tqdm import tqdm
+try:
+    NB = get_ipython().__class__.__name__ == 'ZMQInteractiveShell'
+except:
+    NB = False
+if NB:
+    from tqdm.notebook import tqdm
+else:
+    from tqdm import tqdm
 
 def versor(v):
     v = np.array(v)
