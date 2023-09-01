@@ -7,6 +7,7 @@ import display
 from potential_initialization import *
 import ndsplines
 import plotly.graph_objects as go
+from scipy.integrate import solve_ivp
 
 def mesh3d(mesh,**kwargs):
     vertices = mesh.vertices
@@ -476,7 +477,7 @@ class trap_model:
             voltages.append(voltage)
             if calc_position:
                 position = self.position(voltage, i)
-                positions.append(position)
+                positions.append(position[0])
             # frequencies.append(self.freq(point, voltage))
         voltages = np.array(voltages)
         grads = np.array(grads)
@@ -518,12 +519,50 @@ class trap_model:
         if calc_position:
             return voltages, grads, frequencies, psEs, positions
         else:
-            return voltages, grads, frequencies, psEs
-    
+            return voltages, grads, frequencies, psEs 
+        
+    def transport_motion(self, T, x_i, x_f, voltages, N_ions, protocol):
+        n_seg = len(voltages)
+        profile = np.linspace(x_i, x_f, n_seg)
+        func = ndsplines.make_interp_spline(profile, voltages)
+        v_of_t = lambda t: func(protocol(t, tspan=(0, T), qspan=(x_i, x_f)))
+        return self.motion(T, v_of_t, self.position(voltages[0], x_i, N_ions).flatten())
+
+    def motion(self, T, voltage_of_t, x0):
+        def func(t, v):
+            v = v.reshape((N_ions*2, 3))
+            x = v[:N_ions]
+            dxdt = v[N_ions:].flatten()
+            eom = []
+            voltage = voltage_of_t(t)
+            for i in range(N_ions):
+                d2xdt2 = (q / m * self.electric_field(voltage, x[i])) * 1e3
+                for j in range(N_ions):
+                    if i == j:
+                        continue
+                    r = (x[i] - x[j]) * 1e-3 
+                    d2xdt2 += (k0 * q ** 2 / m * r / np.linalg.norm(r) ** 3) * 1e3
+                eom = np.concatenate([eom, d2xdt2])
+            # print("balance point: ", self.position(voltage, x[0, 0]))
+            # print(t, x, dxdt, eom)
+            print(' %.4f %%' % (t / T * 100), end='\r')
+            return np.concatenate([dxdt, eom])
+        
+        N_ions = int(len(x0) / 3)
+        dxdt0 = np.zeros((N_ions, 3))
+        dxdt0[:, 0] = 6e3
+        return solve_ivp(func, (0, T), np.concatenate([x0, dxdt0.flatten()]))
+        
 
     def potential(self, voltage, points):
         return (self.interp(points) * voltage[:, None]).sum(axis=0) + self.pseudo_interp(points)
-        
+    
+    def electric_field(self, voltage, points):
+        return -((self.jac_SI(points) * voltage[:, None]).sum(axis=0) + self.pseudo_jac_SI(points))
+    
+    def hess_at_point(self, voltage, point):
+        return self.pseudo_hess(point) + (self.hess(point) * voltage[:, None, None]).sum(axis=0)
+       
     def potential_curvature_x(self, voltage, ax=None, points=None):
         x, y, z = get_field_point_ticks(self.shuttle_range)
         points = self.rf_null_point(x)
@@ -532,12 +571,24 @@ class trap_model:
         else:
             ax.plot(x, self.potential(voltage, points))
 
-    def position(self, voltage, guess_x):
-        func = lambda point: self.potential(voltage, point)
-        guess = [guess_x, 0, 0.07]
-        return minimize(func, x0=guess, tol=1e-9, method='Nelder-Mead').x
+    def position(self, voltage, guess_x, N_ions=1):
+
+        def totol_energy(vector):
+            points = vector.reshape((N_ions, 3))
+            E = np.array([self.potential(voltage, point) for point in points]).sum() * q
+            if N_ions > 1:
+                d = np.array([np.linalg.norm(points[i] - points[j]) for i in range(N_ions) for j in range(i+1, N_ions)])
+                E += (k0 * q ** 2 / (d * 1e-3)).sum()
+            return E
+        guess = np.array([[guess_x + (i - N_ions / 2 + 0.5) * 0.0005, 0, 0.07] for i in range(N_ions)]).flatten()
+        return minimize(totol_energy, x0=guess, tol=1e-9, method='Nelder-Mead').x.reshape((N_ions, 3))
+    
+
+    
     
     def freq(self, point, voltages, rotate=False):
+    # 返回的单位是 2*pi MHz
+
         hessian = self.pseudo_hess(point) + (self.hess(point) * voltages[:, None, None]).sum(axis=0)
         if rotate is False:
             eig = np.array([hessian[0, 0], hessian[1, 1], hessian[2, 2]])

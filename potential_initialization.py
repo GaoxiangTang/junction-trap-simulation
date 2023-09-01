@@ -2,7 +2,10 @@ from int_green3d import *
 import trimesh
 import matplotlib.pyplot as plt
 import os
+import scipy
 
+eps0 = scipy.constants.epsilon_0
+k0 = 1/(4*np.pi*eps0)
 q = 1.6e-19
 m = 0.171/6.02e23
 omega_rf = 2 * np.pi * 30e6
