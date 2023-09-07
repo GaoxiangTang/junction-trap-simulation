@@ -84,3 +84,17 @@ def d_t(t, tspan, qspan=(0, 120)):
         return y0 + (yf-y0)*(10*s**3 - 15*s**4 + 6*s**5)
     else:
         return yf
+    
+def const_speed(t, tspan, qspan=(0, 120)):
+    ''' t is a specific time
+        tspan is a tuple with the start and end time'''
+    t0, tf = tspan
+    y0, yf = qspan
+    T, ti = tf-t0, t-t0 
+    s = ti/T
+    if s < 0:
+        return y0
+    elif s <= 1:
+        return y0 + (yf-y0)*s
+    else:
+        return yf
