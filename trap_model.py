@@ -27,13 +27,18 @@ def mesh3d(mesh,**kwargs):
     return (go.Mesh3d(x=x,y=y,z=z,i=I,j=J,k=K,flatshading=True,showscale=False,**kwargs),)
             #go.Scatter3d(x=Xe,y=Ye,z=Ze,mode='lines',line=dict(color='rgb(70,70,70)',width=1),name='')) 
             
-def init_analytic_properties(interp):
+def init_analytic_properties(interp, interp5):
     jac = [interp.derivative(i) for i in range(3)]
     hess = [[interp.derivative(i).derivative(j) for i in range(3)] for j in range(3)]
+    x_taylor = [interp.derivative(0),
+                interp.derivative(0).derivative(0),
+                interp5.derivative(0).derivative(0).derivative(0),
+                interp5.derivative(0).derivative(0).derivative(0).derivative(0)]
     return lambda x: np.array([func(x) for func in jac]).reshape(3),\
            lambda x: np.array([[func(x) for func in col] for col in hess]).reshape((3, 3)),\
            lambda x: np.array([func(x) for func in jac]).reshape(3) * 1e3,\
            lambda x: np.array([[func(x) for func in col] for col in hess]).reshape((3, 3)) * 1e6,\
+           lambda x: np.array([func(x) for func in x_taylor]).reshape(4),\
 
 
 def get_pseudo_potential_interpolation(model, pscoef, srange, stepsize, ppi=None):
@@ -44,8 +49,9 @@ def get_pseudo_potential_interpolation(model, pscoef, srange, stepsize, ppi=None
     pb, pp = get_potential_basis(model, field_points, text=text)
     pp *= pscoef
     # print(pp)
-    interp = ndsplines.make_interp_spline(field_points, pp)
-    return interp, *init_analytic_properties(interp)
+    interp = ndsplines.make_interp_spline(field_points, pp, degrees=3)
+    interp5 = ndsplines.make_interp_spline(field_points, pp, degrees=5)
+    return interp, *init_analytic_properties(interp, interp5)
 # field_points.shape, pp.shape
 
 def get_potential_basis_interpolation(model, srange, stepsize, pbi=None, regenerate=False):
@@ -63,17 +69,19 @@ def get_potential_basis_interpolation(model, srange, stepsize, pbi=None, regener
     field_points = get_field_points(srange, stepsize)
     pb, pp = get_potential_basis(model, field_points=field_points, regenerate=regenerate, text=text)
 
-    interp, jac, hess, jac_SI, hess_SI = [], [], [], [], []
+    interp, jac, hess, jac_SI, hess_SI, x_taylor = [], [], [], [], [], []
     for i in tqdm(range(pb.shape[-1])):
-        itp = ndsplines.make_interp_spline(field_points, pb[...,i])
+        itp = ndsplines.make_interp_spline(field_points, pb[...,i], degrees=3)
+        itp5 = ndsplines.make_interp_spline(field_points, pb[...,i], degrees=5)
         interp.append(itp)
-        j, h, jsi, hsi = init_analytic_properties(itp)
+        j, h, jsi, hsi, x_t = init_analytic_properties(itp, itp5)
         jac.append(j)
         hess.append(h)
         jac_SI.append(jsi)
         hess_SI.append(hsi)
+        x_taylor.append(x_t)
     pbi[text] = (list_function(interp), list_function(jac), list_function(hess)\
-                , list_function(jac_SI), list_function(hess_SI))
+                , list_function(jac_SI), list_function(hess_SI), list_function(x_taylor))
     return pbi[text]
 
 def find_radial_minimum(interp, grad, srange, stepsize, plot=False):
@@ -135,18 +143,25 @@ class trap_model:
         self.sector2idx = defaultdict(list)
         for idx, sector in enumerate(self.idx2sector):
             self.sector2idx[sector].append(idx)
-        self.interp, self.jac, self.hess, self.jac_SI, self.hess_SI = get_potential_basis_interpolation(name, srange=shuttle_range, stepsize=stepsize, pbi=pbi, regenerate=regenerate)  
+        self.interp, self.jac, self.hess, self.jac_SI, self.hess_SI, self.x_taylor = get_potential_basis_interpolation(name, srange=shuttle_range, stepsize=stepsize, pbi=pbi, regenerate=regenerate)  
         self.reset_rf(V_rf, omega_rf)
         self.rf_null = get_rf_null(self.pseudo_interp, self.pseudo_jac, shuttle_range, stepsize)
         self.dc_sectors = data["dc_sectors"]
-        
-        self.weight = [0, 100, 0, 1000, 1, 0.001, 0.001, 0, 0.0005, 0]
+        self.weight = [0, 1000, 0, 100, 1, 0.001, 0.001, 0, 0.0005, 0, 0, 0]
         self.mesh = display.get_mesh(name)
         self.nparts = len(trimesh.graph.connected_components(self.mesh.edges))
+        self.get_taylor_rf_null()
+
+    def get_taylor_rf_null(self):
+        '''
+        calculate taylor expansion of potential at rf null as a function of x coordinate
+        phi(x0+dx) = phi(x0) + a*dx^2 + b * dx^4 +
+        '''
+
 
     def reset_rf(self, V_rf, omega_rf):
         self.pscoef = (q / (4 * m * omega_rf ** 2)) * V_rf ** 2
-        self.pseudo_interp, self.pseudo_jac, self.pseudo_hess, self.pseudo_jac_SI, self.pseudo_hess_SI  \
+        self.pseudo_interp, self.pseudo_jac, self.pseudo_hess, self.pseudo_jac_SI, self.pseudo_hess_SI, self.pseudo_x_taylor  \
             = get_pseudo_potential_interpolation(self.name, self.pscoef, srange=self.shuttle_range, stepsize=self.stepsize)
 
     def depth_of_trap(self, x, ploting=False):
@@ -243,7 +258,7 @@ class trap_model:
         
     
     def coder(self, gc, point):
-        interp, jac, hess, pseudo_interp, pseudo_jac, pseudo_hess = self.field_properties(point)
+        interp, jac, hess, xte, pseudo_interp, pseudo_jac, pseudo_hess, pxte = self.field_properties(point)
         null_voltage = np.zeros(self.nparts)
         g2i = gc.group2idx()
         for f in gc.fixed:
@@ -251,25 +266,24 @@ class trap_model:
         pseudo_interp += (interp * null_voltage[:, None]).sum(axis=0)
         pseudo_jac += (jac * null_voltage[:, None]).sum(axis=0)
         pseudo_hess += (hess * null_voltage[:, None, None]).sum(axis=0)
-        interp, jac, hess = self.pack([interp, jac, hess], gc)
-        return interp, jac, hess, pseudo_interp, pseudo_jac, pseudo_hess
+        pxte += (xte * null_voltage[:, None]).sum(axis=0)
+        interp, jac, hess, xte = self.pack([interp, jac, hess, xte], gc)
+        return interp, jac, hess, xte, pseudo_interp, pseudo_jac, pseudo_hess, pxte
 
 
-    def loss_fn(self, gc, point, omega, w, rotation):
+    def loss_fn(self, gc, point, w, target, rotation=np.eye(3)):
         def func(v):
             E = (jac * v[:, None]).sum(axis=0) + pseudo_jac
             V = (interp * v[:, None]).sum(axis=0) + pseudo_interp
             hessian = (hess * v[:, None, None]).sum(axis=0) + pseudo_hess
             hessian = rotation.T @ hessian @ rotation
-            P = np.array([V[0], E[0], E[1], E[2], hessian[0, 0], hessian[1, 1], hessian[2, 2], hessian[0, 1], hessian[0, 2], hessian[1, 2]])
+            xte = (x_te * v[:, None]).sum(axis=0) + pseudo_x_te
+            P = np.array([V[0], E[0], E[1], E[2], hessian[0, 0], hessian[1, 1], hessian[2, 2], hessian[0, 1], hessian[0, 2], hessian[1, 2], xte[2], xte[3]])
             loss = ((P - target) ** 2 * w).sum()
             # print("loss", loss)
             return loss
 
-        interp, jac, hess, pseudo_interp, pseudo_jac, pseudo_hess = self.coder(gc, point)
-        omega = np.array(omega)
-        k = (m / q * (omega * 2 * np.pi) ** 2) * 1e6
-        target = np.array([0, 0, 0, 0, k[0], k[1], k[2], 0, 0, 0])
+        interp, jac, hess, x_te, pseudo_interp, pseudo_jac, pseudo_hess, pseudo_x_te = self.coder(gc, point)
         return func
     
     
@@ -282,10 +296,27 @@ class trap_model:
             voltages[g2i[g]] = sol_v[i]
         return voltages
     
-    def optimize_voltage(self, x, gc, omega=[0.5, 3, 3], w=None, rotation=np.eye(3)):
+    def optimize_voltage_split(self, x, gc, alpha, beta, w):
         if w is None:
             w = self.weight
-        loss_fn = self.loss_fn(gc, self.rf_null_point(x), omega, w, rotation)
+        
+    
+    def target_vec(self, t_type='point', omega=None, alpha=None, beta=None):
+        if t_type == 'point':
+            omega = np.array(omega)
+            k = (m / q * (omega * 2 * np.pi) ** 2) * 1e6
+            target = [0, 0, 0, 0, k[0], k[1], k[2], 0, 0, 0, 0, 0]
+        if t_type == 'split':
+            omega = np.array([0.5, 3, 3])
+            k = (m / q * (omega * 2 * np.pi) ** 2) * 1e6
+            target = [0, 0, 0, 0, alpha, k[1], k[2], 0, 0, 0, 0, beta]
+        return target 
+    
+    def optimize_voltage(self, t_type, x, gc, omega=[0.5, 3, 3], w=None, rotation=np.eye(3), alpha=None, beta=None):
+        if w is None:
+            w = self.weight
+        loss_fn = self.loss_fn(gc, self.rf_null_point(x), w,
+                                self.target_vec(t_type, omega=omega, alpha=alpha, beta=beta), rotation)
         sol_v = minimize(loss_fn, x0=gc.guess(), bounds=list(gc.cons.values()), method="SLSQP").x
         # print(gc.cons, '\n', sol_v)
         return self.decoder(sol_v, gc)
@@ -310,7 +341,7 @@ class trap_model:
             gc = self.top_nearest(point, top_nearest, base_gc)
             if len(volts) != 0:
                 self.smooth_constrain(gc, base_gc, volts[-1], alpha * dx)
-            v = self.optimize_voltage(x, gc, omega=omega, w=w)
+            v = self.optimize_voltage('point', x, gc, omega=omega, w=w)
             volts.append(v)
             # print("point ideal", point)
             # print("frequency",self.freq(point, v))
@@ -342,8 +373,8 @@ class trap_model:
         return volts
 
     def field_properties(self, point):
-        return self.interp(point), self.jac(point), self.hess(point),\
-                self.pseudo_interp(point), self.pseudo_jac(point), self.pseudo_hess(point)
+        return self.interp(point), self.jac(point), self.hess(point), self.x_taylor(point),\
+                self.pseudo_interp(point), self.pseudo_jac(point), self.pseudo_hess(point), self.pseudo_x_taylor(point)
     
     def get_dual(self, indices):
         return [self.dual[idx] for idx in indices]
@@ -357,7 +388,7 @@ class trap_model:
         n_seg = len(voltages)
         profile = np.linspace(x_i, x_f, n_seg)
         func = ndsplines.make_interp_spline(profile, voltages)
-        q0_of_t = lambda t: protocol(t, tspan=(0, T), qspan=(x_i, x_f))
+        q0_of_t = lambda t: protocol(t, tspan=(0, T), qspan=(x_i, x_f), f=5e5)
         v_of_t = lambda t: func(q0_of_t(t))
         tspan, y = self.motion(T + Th, v_of_t, self.position(voltages[0], x_i, N_ions).flatten())
         return q0_of_t, tspan, y
@@ -423,6 +454,9 @@ class trap_model:
 
     def potential(self, voltage, points):
         return (self.interp(points) * voltage[:, None]).sum(axis=0) + self.pseudo_interp(points)
+    
+    def x_te(self, voltage, points):
+        return (self.x_taylor(points) * voltage[:, None]).sum(axis=0) + self.pseudo_x_taylor(points)
     
     def electric_field(self, voltage, points):
         return -((self.jac_SI(points) * voltage[:, None]).sum(axis=0) + self.pseudo_jac_SI(points))

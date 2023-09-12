@@ -1,5 +1,7 @@
 import numpy as np
 from numpy import pi
+from scipy import constants
+from scipy.misc import derivative
 
 def qtanhN(t, tspan, qspan=(0, 120), N=5):
     ''' t is a specific time
@@ -98,3 +100,24 @@ def const_speed(t, tspan, qspan=(0, 120)):
         return y0 + (yf-y0)*s
     else:
         return yf
+    
+def split_sta(s):
+    f0 = 5e5*2*np.pi
+    mass = 171 * constants.atomic_mass
+    eps0 = constants.epsilon_0
+    K = constants.e**2/(4*np.pi*eps0)
+    _a10, _a11 = -780, 127
+    a0 = 0.5*mass*f0**2
+    l0 = 2*a0/mass*np.array([1, 3]) ## (-, +)
+    lf = 2*a0/mass*np.array([1, 1.002])
+    gp, gm = (l0/lf)**0.25
+    rho_m_t = lambda s, a10=_a10, a11=_a11: 1-(126*(1-gm) + a10 + 5*a11)*s**5 + (420*(1-gm) + 5*a10 + 24*a11)*s**6 - (540*(1-gm) + 10*a10 + 45*a11)*s**7 + (315*(1-gm) + 10*a10 + 40*a11)*s**8 - (70*(1-gm) + 5*a10 + 15*a11)*s**9 + a10*s**10 + a11*s**11
+     
+    rho_m = rho_m_t(s)
+    d2rho_pdt2 = derivative(rho_m_t, s, n=2)
+    lm_t = l0[1]*rho_m**(-4) - d2rho_pdt2/rho_m
+    lp_t = l0[0]
+    d_ideal = (4*K/(mass*(lm_t-lp_t)))**(1/3) ## SI units [m]
+    a_ideal = (mass/8*(3*lm_t - 5*lp_t)) ## SI units [V/m^2]
+    b_ideal = (2*K*(d_ideal)**(-5) - 2*a_ideal*(d_ideal)**(-2)) ## SI units [V/m^4]
+    return a_ideal*1e-6*2/constants.e, b_ideal*1e-12*24/constants.e
