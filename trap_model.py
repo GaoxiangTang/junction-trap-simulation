@@ -11,6 +11,8 @@ import plotly.graph_objects as go
 from scipy.integrate import solve_ivp
 from scipy import constants
 from scipy.misc import derivative
+import shuttle_protocols
+from numpy.polynomial import Chebyshev
 
 def mesh3d(mesh,**kwargs):
     vertices = mesh.vertices
@@ -150,14 +152,15 @@ class trap_model:
         self.weight = [0, 1000, 0, 100, 1, 0.001, 0.001, 0, 0.0005, 0, 0, 0]
         self.mesh = display.get_mesh(name)
         self.nparts = len(trimesh.graph.connected_components(self.mesh.edges))
-        self.get_taylor_rf_null()
 
-    def get_taylor_rf_null(self):
-        '''
-        calculate taylor expansion of potential at rf null as a function of x coordinate
-        phi(x0+dx) = phi(x0) + a*dx^2 + b * dx^4 +
-        '''
-
+    def voltage(self, vdict):
+        v = np.zeros(self.nparts)
+        for e in vdict:
+            e1, e2 = self.pairs[e]
+            v[e2] = vdict[e]
+            v[e1] = vdict[e]
+        return v
+    
 
     def reset_rf(self, V_rf, omega_rf):
         self.pscoef = (q / (4 * m * omega_rf ** 2)) * V_rf ** 2
@@ -227,18 +230,18 @@ class trap_model:
             return  _pack(props)
         return [_pack(prop) for prop in props]
     
-    def top_nearest(self, point, ntop, base_gc):
+    def top_nearest(self, point, ntop, base_gc, outer_v=0):
         
         ind = self.pack((self.jac(point)**2), base_gc).sum(axis=1)
         sl = sorted([(i, idx) for idx, i in zip(list(base_gc.cons), ind)], reverse=True)
         # print(sl)
         gc = deepcopy(base_gc)
         for i, idx in sl[ntop:]:
-            gc.fixed[idx] = 0
+            gc.fixed[idx] = outer_v
             gc.cons.pop(idx)
         return gc
     
-    def base_gc(self, paired=True, ground_bias=True, max_v=10):
+    def base_gc(self, paired=True, ground_bias=True, max_v=10, only_negative=True):
         gi, cons, fixed = dict(), dict(), dict()
 
         for p in self.pairs:
@@ -246,11 +249,17 @@ class trap_model:
             if paired:
                 gi[l] = p
                 gi[r] = p
-                cons[p] = (-max_v, 0)
+                if only_negative:
+                    cons[p] = (-max_v, 0)
+                else:
+                    cons[p] = (-max_v, max_v)
             else:
                 gi[l] = l
                 gi[r] = r
-                cons[l] = cons[r] = (-max_v, 0)
+                if only_negative:
+                    cons[l] = cons[r] = (-max_v, 0)
+                else:
+                    cons[l] = cons[r] = (-max_v, max_v)
         if ground_bias:
             gi[1] = 'dc ground'
             cons['dc ground'] = (-max_v/2, max_v/2)  
@@ -280,12 +289,13 @@ class trap_model:
             xte = (x_te * v[:, None]).sum(axis=0) + pseudo_x_te
             P = np.array([V[0], E[0], E[1], E[2], hessian[0, 0], hessian[1, 1], hessian[2, 2], hessian[0, 1], hessian[0, 2], hessian[1, 2], xte[2], xte[3]])
             loss = ((P - target) ** 2 * w).sum()
-            # print("loss", loss)
+            print("loss", loss)
             return loss
 
         interp, jac, hess, x_te, pseudo_interp, pseudo_jac, pseudo_hess, pseudo_x_te = self.coder(gc, point)
         return func
     
+    # def loss_fn(self, chebi)
     
     def decoder(self, sol_v, gc):
         voltages = np.zeros(self.nparts)
@@ -312,14 +322,36 @@ class trap_model:
             target = [0, 0, 0, 0, alpha, k[1], k[2], 0, 0, 0, 0, beta]
         return target 
     
-    def optimize_voltage(self, t_type, x, gc, omega=[0.5, 3, 3], w=None, rotation=np.eye(3), alpha=None, beta=None):
+    def optimize_voltage(self, t_type, x0, gc, omega=[0.5, 3, 3], w=None, rotation=np.eye(3), alpha=None, beta=None, deg=5):
         if w is None:
             w = self.weight
-        loss_fn = self.loss_fn(gc, self.rf_null_point(x), w,
-                                self.target_vec(t_type, omega=omega, alpha=alpha, beta=beta), rotation)
-        sol_v = minimize(loss_fn, x0=gc.guess(), bounds=list(gc.cons.values()), method="SLSQP").x
-        # print(gc.cons, '\n', sol_v)
-        return self.decoder(sol_v, gc)
+        if t_type == 'point':
+            loss_fn = self.loss_fn(gc, self.rf_null_point(x0), w,
+                                    self.target_vec(t_type, omega=omega, alpha=alpha, beta=beta), rotation)
+            sol_v = minimize(loss_fn, x0=gc.guess(), bounds=list(gc.cons.values()), method="SLSQP").x
+            # print(gc.cons, '\n', sol_v)
+            return self.decoder(sol_v, gc)
+        if t_type == 'split':
+            func = lambda x, poly: poly[0]*(x-x0)+poly[1]*(x-x0)**2/2+poly[2]*(x-x0)**3/6+poly[3]*(x-x0)**4/24
+            xdata = np.linspace(x0-0.1, x0+0.1, 100)
+            ydata = func(xdata, np.array([0, alpha, 0, beta]))
+            ideal = Chebyshev.fit(xdata, ydata, deg=deg).coef
+            points = self.rf_null_point(xdata)
+            center = self.rf_null_point(x0)
+            phis = self.interp(points)
+            pphi = self.pseudo_interp(points).astype(np.float32)
+            ps = Chebyshev.fit(xdata, pphi, deg=deg).coef
+            ss = np.array([Chebyshev.fit(xdata, phi, deg=deg).coef for phi in phis])
+            def func(v):
+                v = self.decoder(v, gc)
+                loss = ((((ss * v[:, None]).sum(axis=0) + ps-ideal) * 1000)**2).sum()
+                # ((self.jac_SI(points) * voltage[:, None]).sum(axis=0) + self.pseudo_jac_SI(points))
+                # *100 + ((self.jac(center)[:, 2] * v).sum() + self.pseudo_jac(center)[2])**2
+                return loss
+            
+            v = minimize(func, x0=gc.guess(), bounds=list(gc.cons.values())).x
+            print(func(v))
+            return self.decoder(v, gc)
     
     def smooth_constrain(self, gc, base_gc, v, alphadx):
         g2i = gc.group2idx()
@@ -371,6 +403,38 @@ class trap_model:
                 plt.show()
             plt.plot(profile, freqs)
         return volts
+    
+    def optimize_splitting_profile(self, x0, top_nearest=9, deg=5, max_v=40, para=[-637.36273847,  101.30581049], f0=0.15, plot=True):
+        # 在x=0.4时rf零点的坐标，
+        rf_null = self.rf_null_point(x=x0)
+        # 初始化 电极配对、dc接地电极偏置 情况下的电极分组情况
+        base_gc = self.base_gc(paired=True, ground_bias=False, max_v=max_v, only_negative=False)
+        # 找到距离目标点最近的7对电极（以及dc接地电极）
+        gc = self.top_nearest(rf_null, top_nearest, base_gc, 0)
+
+        T = 2e-5 * 5e5*2*np.pi / (f0*1e6*2*np.pi)
+
+        s = np.linspace(0, 1, 40)
+        a, b, d=  shuttle_protocols.split_sta_palmero(s, *para, f0)
+        V = []
+        for alpha, beta in tqdm(zip(a, b)):
+            v = self.optimize_voltage(t_type='split', x0=x0, gc=gc, alpha=alpha, beta=beta, deg=deg)
+            V.append(v)
+        V = np.array(V)
+        if plot:
+            g2i = base_gc.group2idx()
+            for g in base_gc.cons:
+                v = V[:, g2i[g][0]]
+                if np.linalg.norm(v) > 1e-3:
+                    if np.linalg.norm(v) > 10:
+                        plt.plot(s*T, v, label=g)
+                    else:
+                        plt.plot(s*T, v)
+            plt.xlabel("t(s)")
+            plt.ylabel("U(V)")
+            plt.legend()
+            plt.show()
+        return T, V
 
     def field_properties(self, point):
         return self.interp(point), self.jac(point), self.hess(point), self.x_taylor(point),\
@@ -419,12 +483,19 @@ class trap_model:
             plt.legend()
         return heating
         
-    def heating_one_ion(self, q0_of_t, tspan, T, y, freq=5e5*2*np.pi, plot=True):
-        yvalues = y[0, tspan>T]
+    def heating_one_ion(self, tspan, T, y, freq=5e5*2*np.pi):
+        yvalues = y[tspan>T]
         maxy = np.max(yvalues)
         miny = np.min(yvalues)
         A = (maxy-miny)/2
         return (A*1e-3)**2*m*np.abs(freq)/(2*constants.hbar)
+    
+    def split_motion(self, x0, T, V):
+        profile = np.linspace(0, T, len(V))
+        v_of_t = lambda t: ndsplines.make_interp_spline(profile, V)(t) if t < T else V[-1]
+        x0 = self.position(V[0], x0, 2)
+        return self.motion(T*1.2, v_of_t, x0)
+
 
     def motion(self, T, voltage_of_t, x0):
         def func(t, v):
@@ -446,6 +517,7 @@ class trap_model:
             print(' %.4f %%' % (t / T * 100), end='\r')
             return np.concatenate([dxdt, eom])
         
+        x0 = x0.flatten()
         N_ions = int(len(x0) / 3)
         dxdt0 = np.zeros((N_ions, 3))
         sol = solve_ivp(func, (0, T), np.concatenate([x0, dxdt0.flatten()]))
@@ -464,13 +536,14 @@ class trap_model:
     def hess_at_point(self, voltage, point):
         return self.pseudo_hess(point) + (self.hess(point) * voltage[:, None, None]).sum(axis=0)
        
-    def potential_curvature_x(self, voltage, ax=None, points=None):
-        x, y, z = get_field_point_ticks(self.shuttle_range, stepsize=self.stepsize)
+    def potential_curvature_x(self, voltage, x=None, ax=None, points=None, label=None):
+        if x is None:
+            x, y, z = get_field_point_ticks(self.shuttle_range, stepsize=self.stepsize)
         points = self.rf_null_point(x)
         if ax is None:
-            plt.plot(x, self.potential(voltage, points))
+            plt.plot(x, self.potential(voltage, points), label=label)
         else:
-            ax.plot(x, self.potential(voltage, points))
+            ax.plot(x, self.potential(voltage, points), label=label)
 
     def position(self, voltage, guess_x, N_ions=1):
 
