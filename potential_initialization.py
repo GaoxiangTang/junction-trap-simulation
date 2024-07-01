@@ -8,8 +8,8 @@ eps0 = scipy.constants.epsilon_0
 k0 = 1/(4*np.pi*eps0)
 q = 1.6e-19
 m = 0.171/6.02e23
-omega_rf = 2 * np.pi * 30e6
-V_rf = 170
+# omega_rf = 2 * np.pi * 30e6
+# V_rf = 170
 PATH = ""
 
 def get_mesh(model):
@@ -60,7 +60,7 @@ def get_potential_basis(model, field_points, regenerate=False, rf_id=0, text="")
     
     grid = field_points.shape[:-1]
 
-    print("Calculating propagators")
+    print("Calculating propagators with #%d as rf"%rf_id)
     potential_propagators, grad_propagators = gauss_electrostatic_propagator(field_points, mesh.triangles)
     grad_propagators = np.transpose(grad_propagators, (2, 0, 1))
     field_points_grad = grad_propagators @ charge_basis[rf_id]
@@ -75,11 +75,11 @@ def get_potential_basis(model, field_points, regenerate=False, rf_id=0, text="")
 
     return potential_basis, pseudo_potential
 
-default_PSCoef = (q / (4 * m * omega_rf ** 2)) * V_rf ** 2
+# default_PSCoef = (q / (4 * m * omega_rf ** 2)) * V_rf ** 2
 
 def get_total_potential(voltage, potential_basis, pseudo_potential, PSCoef=None):
-    if PSCoef is None:
-        PSCoef = default_PSCoef
+    # if PSCoef is None:
+    #     PSCoef = default_PSCoef
     dc_potential = np.dot(potential_basis, voltage)
     return dc_potential + pseudo_potential * PSCoef
 

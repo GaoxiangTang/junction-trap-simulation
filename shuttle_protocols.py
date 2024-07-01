@@ -91,7 +91,8 @@ def d_t(t, tspan, qspan=(0, 120)):
     
 def const_speed(t, tspan, qspan=(0, 120)):
     ''' t is a specific time
-        tspan is a tuple with the start and end time'''
+        tspan is a tuple with the start and end time
+    '''
     t0, tf = tspan
     y0, yf = qspan
     T, ti = tf-t0, t-t0 
@@ -112,7 +113,9 @@ def split_sta_lukeqi(s, a10=-780, a11=127):
     l0 = 2*a0/mass*np.array([1, 3]) ## (-, +)
     lf = 2*a0/mass*np.array([1, 1.00002])
     gp, gm = (l0/lf)**0.25
-    rho_m_t = lambda s, a10=a10, a11=a11: 1-(126*(1-gm) + a10 + 5*a11)*s**5 + (420*(1-gm) + 5*a10 + 24*a11)*s**6 - (540*(1-gm) + 10*a10 + 45*a11)*s**7 + (315*(1-gm) + 10*a10 + 40*a11)*s**8 - (70*(1-gm) + 5*a10 + 15*a11)*s**9 + a10*s**10 + a11*s**11
+    rho_m_t = lambda s, a10=a10, a11=a11: 1-(126*(1-gm) + a10 + 5*a11)*s**5 + \
+        (420*(1-gm) + 5*a10 + 24*a11)*s**6 - (540*(1-gm) + 10*a10 + 45*a11)*s**7 + \
+            (315*(1-gm) + 10*a10 + 40*a11)*s**8 - (70*(1-gm) + 5*a10 + 15*a11)*s**9 + a10*s**10 + a11*s**11
      
     rho_m = rho_m_t(s)
     d2rho_pdt2 = derivative(rho_m_t, s, n=2)

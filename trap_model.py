@@ -13,21 +13,6 @@ from scipy import constants
 from scipy.misc import derivative
 import shuttle_protocols
 from numpy.polynomial import Chebyshev
-
-def mesh3d(mesh,**kwargs):
-    vertices = mesh.vertices
-    triangles = mesh.faces
-    x, y, z = vertices.T
-    I, J, K = triangles.T              
-    Xe = []
-    Ye = []
-    Ze = []
-    for T in vertices[triangles] :
-        Xe.extend([T[k%3][0] for k in range(4)]+[None])
-        Ye.extend([T[k%3][1] for k in range(4)]+[None])
-        Ze.extend([T[k%3][2] for k in range(4)]+[None])
-    return (go.Mesh3d(x=x,y=y,z=z,i=I,j=J,k=K,flatshading=True,showscale=False,**kwargs),)
-            #go.Scatter3d(x=Xe,y=Ye,z=Ze,mode='lines',line=dict(color='rgb(70,70,70)',width=1),name='')) 
             
 def init_analytic_properties(interp, interp5):
     jac = [interp.derivative(i) for i in range(3)]
@@ -43,12 +28,12 @@ def init_analytic_properties(interp, interp5):
            lambda x: np.array([func(x) for func in x_taylor]).reshape(4),\
 
 
-def get_pseudo_potential_interpolation(model, pscoef, srange, stepsize, ppi=None):
+def get_pseudo_potential_interpolation(model, rf_id, pscoef, srange, stepsize):
     text = "range_" + str(srange) + "stepsize_" + str(stepsize)
     # if ppi is not None and text in ppi:
     #     return ppi[model]
     field_points = get_field_points(srange, stepsize)
-    pb, pp = get_potential_basis(model, field_points, text=text)
+    pb, pp = get_potential_basis(model, field_points, text=text, rf_id=rf_id)
     pp *= pscoef
     # print(pp)
     interp = ndsplines.make_interp_spline(field_points, pp, degrees=3)
@@ -56,7 +41,7 @@ def get_pseudo_potential_interpolation(model, pscoef, srange, stepsize, ppi=None
     return interp, *init_analytic_properties(interp, interp5)
 # field_points.shape, pp.shape
 
-def get_potential_basis_interpolation(model, srange, stepsize, pbi=None, regenerate=False):
+def get_potential_basis_interpolation(model, rf_id, srange, stepsize, pbi=None, regenerate=False):
     
     text = "range_" + str(srange) + "stepsize_" + str(stepsize)
     def list_function(function_list):
@@ -69,7 +54,7 @@ def get_potential_basis_interpolation(model, srange, stepsize, pbi=None, regener
         return pbi[text]
     
     field_points = get_field_points(srange, stepsize)
-    pb, pp = get_potential_basis(model, field_points=field_points, regenerate=regenerate, text=text)
+    pb, pp = get_potential_basis(model, rf_id=rf_id, field_points=field_points, regenerate=regenerate, text=text)
 
     interp, jac, hess, jac_SI, hess_SI, x_taylor = [], [], [], [], [], []
     for i in tqdm(range(pb.shape[-1])):
@@ -93,7 +78,7 @@ def find_radial_minimum(interp, grad, srange, stepsize, plot=False):
         func = lambda y: interp([x, y[0], y[1]])
         jac = lambda y: grad([x, y[0], y[1]])[1:]
         # hess = lambda y: hessian([x, y[0], y[1]])[1:, 1:] 
-        res = minimize(func, x0=[0, 0.07], jac=jac, tol=1e-15, bounds=[(-0.1, 0.1), (0.05, 0.1)])
+        res = minimize(func, x0=[0, (ztick.max()+ztick.min())/2], jac=jac, tol=1e-15, bounds=[(-0.1, 0.1), (0.05, 0.2)])
         locations.append(res.x)
     locations = np.array(locations)
     if plot:
@@ -126,7 +111,7 @@ class group_constrain_info:
 
 
 class trap_model:
-    def __init__(self, name, V_rf, omega_rf, shuttle_range, stepsize, pbi=None, ppi=None, regenerate=False) -> None:
+    def __init__(self, name, V_rf, omega_rf, shuttle_range, stepsize, pbi=None, ppi=None, regenerate=False, rf_id=None) -> None:
         #print("这tqdm有大病")
         data = np.load("models\%s.npz" % name, allow_pickle=True)
         self.name = name
@@ -137,15 +122,28 @@ class trap_model:
         self.shuttle_range = shuttle_range
         self.stepsize = stepsize
         for k in self.pairs:
-            p1, p2 = self.pairs[k]
-            self.dual[p1] = p2
-            self.dual[p2] = p1
-            self.idx2name[p1] = self.idx2name[p2] = k
+            if k=="ground":
+                self.ground_id=self.pairs[k]
+            elif k=="rf":
+                self.rf_id=self.pairs[k][0]
+            else:
+                p1, p2 = self.pairs[k]
+                self.dual[p1] = p2
+                self.dual[p2] = p1
+                self.idx2name[p1] = self.idx2name[p2] = k
+        if rf_id is not None:
+            self.rf_id = rf_id
+        else:
+            self.rf_id = 0
+        if "xcenter" in data:
+            self.xcenter = data["xcenter"]
+        else:
+            self.xcenter = None
         self.idx2sector = data["idx2sector"]
         self.sector2idx = defaultdict(list)
         for idx, sector in enumerate(self.idx2sector):
             self.sector2idx[sector].append(idx)
-        self.interp, self.jac, self.hess, self.jac_SI, self.hess_SI, self.x_taylor = get_potential_basis_interpolation(name, srange=shuttle_range, stepsize=stepsize, pbi=pbi, regenerate=regenerate)  
+        self.interp, self.jac, self.hess, self.jac_SI, self.hess_SI, self.x_taylor = get_potential_basis_interpolation(name, rf_id=self.rf_id, srange=shuttle_range, stepsize=stepsize, pbi=pbi, regenerate=regenerate)  
         self.reset_rf(V_rf, omega_rf)
         self.rf_null = get_rf_null(self.pseudo_interp, self.pseudo_jac, shuttle_range, stepsize)
         self.dc_sectors = data["dc_sectors"]
@@ -165,20 +163,22 @@ class trap_model:
     def reset_rf(self, V_rf, omega_rf):
         self.pscoef = (q / (4 * m * omega_rf ** 2)) * V_rf ** 2
         self.pseudo_interp, self.pseudo_jac, self.pseudo_hess, self.pseudo_jac_SI, self.pseudo_hess_SI, self.pseudo_x_taylor  \
-            = get_pseudo_potential_interpolation(self.name, self.pscoef, srange=self.shuttle_range, stepsize=self.stepsize)
+            = get_pseudo_potential_interpolation(self.name, self.rf_id, self.pscoef, srange=self.shuttle_range, stepsize=self.stepsize)
 
     def depth_of_trap(self, x, ploting=False):
         p = self.rf_null_point(x)
         zrange = np.linspace(*self.shuttle_range[2], 100)
         potential_list = [self.potential(np.zeros(self.nparts), [p[0], p[1], z]) for z in zrange]
         #np.zeros(94)长度94的0向量；p[0]和p[1]为x=0.55截面赝势零点的xy坐标，p[2]赝势零点z坐标；
-        opt = minimize(lambda z: -self.potential(np.zeros(self.nparts), [p[0], p[1], z]), x0=p[2] + 0.005, bounds=[(p[2], 0.2)])
+        opt = minimize(lambda z: -self.potential(np.zeros(self.nparts), [p[0], p[1], z[0]])[0], x0=p[2] + 0.005, bounds=[(p[2], 0.2)])
         if ploting is True:
-            plt.plot(zrange, potential_list)
+            plt.plot(zrange, potential_list, label=self.name)
             plt.xlabel("z(mm)")
             plt.ylabel("potential")
-            plt.vlines(x=p[2], ymin=-0.1, ymax=0.5, label="rf null", color="orange", linestyles='dashed') #p[2]赝势零点z坐标，虚线位置不对应呀？；
-            plt.vlines(x=opt.x, ymin=-0.1, ymax=0.5, label="escape point", color="red", linestyles='dashed')
+            plt.vlines(x=p[2], ymin=min(potential_list), ymax=max(potential_list), linestyles='dashed')
+                    #, label="rf null "+self.name    , color="orange") #p[2]赝势零点z坐标，虚线位置不对应呀？；
+            plt.vlines(x=opt.x, ymin=min(potential_list), ymax=max(potential_list), linestyles='dashed')
+                    #, label="escape point "+self.name    , color="red")
             plt.title("x=%fmm" % x)
             plt.legend()
         return opt.x[0] - p[2]
@@ -192,7 +192,7 @@ class trap_model:
             for e in electrodode:
                 part_id += self.pairs[e]
         elif sector is not None:
-            if isinstance(sector, int):
+            if isinstance(sector, int): 
                 sector = [sector]
             part_id = []
             for s in sector:
@@ -204,7 +204,7 @@ class trap_model:
         layout = go.Layout(scene=scene,margin=dict(r=0,l=0,b=0,t=0))#,height=400)
         data = []
         for i in range(len(electrodes)):
-            data += mesh3d(electrodes[i],color='goldenrod' if i in part_id else 'grey',hoverinfo='name',name=str(i),opacity=1 if i in part_id else 0.5)
+            data += display.mesh3d(electrodes[i],color='goldenrod' if i in part_id else 'grey',hoverinfo='name',name=str(i),opacity=1 if i in part_id else 0.5)
         return go.Figure(data=data,layout=layout)
 
     def plot_slice(self, voltage, x=None, z=None, ax=None):
@@ -232,8 +232,9 @@ class trap_model:
     
     def top_nearest(self, point, ntop, base_gc, outer_v=0):
         
-        ind = self.pack((self.jac(point)**2), base_gc).sum(axis=1)
-        sl = sorted([(i, idx) for idx, i in zip(list(base_gc.cons), ind)], reverse=True)
+        # ind = self.pack((self.jac(point)**2), base_gc).sum(axis=1)
+        ind = -abs(self.pack(self.xcenter, base_gc)/2-point[0])
+        sl = sorted([(0 if idx=="ground" else i, idx) for idx, i in zip(list(base_gc.cons), ind)], reverse=True)
         # print(sl)
         gc = deepcopy(base_gc)
         for i, idx in sl[ntop:]:
@@ -245,6 +246,8 @@ class trap_model:
         gi, cons, fixed = dict(), dict(), dict()
 
         for p in self.pairs:
+            if p == "rf" or p == "ground":
+                continue
             l, r = self.pairs[p]
             if paired:
                 gi[l] = p
@@ -261,8 +264,9 @@ class trap_model:
                 else:
                     cons[l] = cons[r] = (-max_v, max_v)
         if ground_bias:
-            gi[1] = 'dc ground'
-            cons['dc ground'] = (-max_v/2, max_v/2)  
+            for gid in self.ground_id:
+                gi[gid] = 'ground'
+            cons['ground'] = (-max_v/2, max_v/2)  
         return group_constrain_info(fixed, gi, cons)
         
     
@@ -289,7 +293,7 @@ class trap_model:
             xte = (x_te * v[:, None]).sum(axis=0) + pseudo_x_te
             P = np.array([V[0], E[0], E[1], E[2], hessian[0, 0], hessian[1, 1], hessian[2, 2], hessian[0, 1], hessian[0, 2], hessian[1, 2], xte[2], xte[3]])
             loss = ((P - target) ** 2 * w).sum()
-            print("loss", loss)
+            # print("loss", loss)
             return loss
 
         interp, jac, hess, x_te, pseudo_interp, pseudo_jac, pseudo_hess, pseudo_x_te = self.coder(gc, point)
@@ -322,7 +326,7 @@ class trap_model:
             target = [0, 0, 0, 0, alpha, k[1], k[2], 0, 0, 0, 0, beta]
         return target 
     
-    def optimize_voltage(self, t_type, x0, gc, omega=[0.5, 3, 3], w=None, rotation=np.eye(3), alpha=None, beta=None, deg=5):
+    def optimize_voltage(self, t_type, x0, gc, omega=[0.5, 3, 3], w=None, rotation=np.eye(3), alpha=None, beta=None, deg=5, v0=None):
         if w is None:
             w = self.weight
         if t_type == 'point':
@@ -347,10 +351,13 @@ class trap_model:
                 loss = ((((ss * v[:, None]).sum(axis=0) + ps-ideal) * 1000)**2).sum()
                 # ((self.jac_SI(points) * voltage[:, None]).sum(axis=0) + self.pseudo_jac_SI(points))
                 # *100 + ((self.jac(center)[:, 2] * v).sum() + self.pseudo_jac(center)[2])**2
+                if v0 is not None:
+                    penalty=((v-v0)**2).sum() / (v0**2).sum()
+                    return loss+penalty*0.03 
                 return loss
             
             v = minimize(func, x0=gc.guess(), bounds=list(gc.cons.values())).x
-            print(func(v))
+            # print(func(v))
             return self.decoder(v, gc)
     
     def smooth_constrain(self, gc, base_gc, v, alphadx):
@@ -404,26 +411,32 @@ class trap_model:
             plt.plot(profile, freqs)
         return volts
     
-    def optimize_splitting_profile(self, x0, top_nearest=9, deg=5, max_v=40, para=[-637.36273847,  101.30581049], f0=0.15, plot=True):
-        # 在x=0.4时rf零点的坐标，
-        rf_null = self.rf_null_point(x=x0)
-        # 初始化 电极配对、dc接地电极偏置 情况下的电极分组情况
-        base_gc = self.base_gc(paired=True, ground_bias=False, max_v=max_v, only_negative=False)
-        # 找到距离目标点最近的7对电极（以及dc接地电极）
-        gc = self.top_nearest(rf_null, top_nearest, base_gc, 0)
+    def optimize_splitting_profile(self, x0, gc=None, top_nearest=9, deg=5, max_v=40, para=[-637.36273847,  101.30581049], f0=0.15, plot=True):
+        
+        if gc is None:
+            # 在x=0.4时rf零点的坐标，
+            rf_null = self.rf_null_point(x=x0)
+            # 初始化 电极配对、dc接地电极偏置 情况下的电极分组情况
+            base_gc = self.base_gc(paired=True, ground_bias=False, max_v=max_v, only_negative=False)
+            # 找到距离目标点最近的7对电极（以及dc接地电极）
+            gc = self.top_nearest(rf_null, top_nearest, base_gc, 0)
 
         T = 2e-5 * 5e5*2*np.pi / (f0*1e6*2*np.pi)
+        
 
         s = np.linspace(0, 1, 40)
         a, b, d=  shuttle_protocols.split_sta_palmero(s, *para, f0)
         V = []
         for alpha, beta in tqdm(zip(a, b)):
-            v = self.optimize_voltage(t_type='split', x0=x0, gc=gc, alpha=alpha, beta=beta, deg=deg)
+            if len(V)==0:
+                v = self.optimize_voltage(t_type='split', x0=x0, gc=gc, alpha=alpha, beta=beta, deg=deg)
+            else:
+                v = self.optimize_voltage(t_type='split', x0=x0, gc=gc, alpha=alpha, beta=beta, deg=deg, v0=V[-1])
             V.append(v)
         V = np.array(V)
         if plot:
-            g2i = base_gc.group2idx()
-            for g in base_gc.cons:
+            g2i = gc.group2idx()
+            for g in gc.cons:
                 v = V[:, g2i[g][0]]
                 if np.linalg.norm(v) > 1e-3:
                     if np.linalg.norm(v) > 10:
@@ -434,7 +447,7 @@ class trap_model:
             plt.ylabel("U(V)")
             plt.legend()
             plt.show()
-        return T, V
+        return T*s, V
 
     def field_properties(self, point):
         return self.interp(point), self.jac(point), self.hess(point), self.x_taylor(point),\
@@ -448,16 +461,16 @@ class trap_model:
             sectors = self.dc_sectors
         return [p for sector in sectors for p in self.sector2idx[sector]]
         
-    def transport_motion(self, T, x_i, x_f, voltages, N_ions, protocol, Th=1e-5):
+    def transport_motion(self, T, x_i, x_f, voltages, N_ions, protocol, Th=1e-5, freq=5e5):
         n_seg = len(voltages)
         profile = np.linspace(x_i, x_f, n_seg)
         func = ndsplines.make_interp_spline(profile, voltages)
-        q0_of_t = lambda t: protocol(t, tspan=(0, T), qspan=(x_i, x_f), f=5e5)
+        q0_of_t = lambda t: protocol(t, tspan=(0, T), qspan=(x_i, x_f), f=freq)
         v_of_t = lambda t: func(q0_of_t(t))
         tspan, y = self.motion(T + Th, v_of_t, self.position(voltages[0], x_i, N_ions).flatten())
         return q0_of_t, tspan, y
 
-    def heating_one_ion_during_transportation(self, q0_of_t, tspan, y, freq=5e5*2*np.pi, plot=True):
+    def heating_one_ion_during_transportation(self, q0_of_t, tspan, y, freq=5e5*2*np.pi, plot=True, ax=None):
         # computing the heating rate during single ion transportation without axis pivoting.
         heating, momentums, Vs = [], [], []
         quanta = constants.hbar * freq
@@ -478,9 +491,15 @@ class trap_model:
             # plt.xlabel('t/s')
             # plt.ylabel('heating rate')
             # plt.show()
-            plt.plot(tspan, momentums, label='momentum')
-            # plt.plot(tspan, Vs, label='potential')
-            plt.legend()
+            if ax is None:
+                plt.plot(tspan, momentums, label='momentum')
+                # plt.plot(tspan, Vs, label='potential')
+                plt.legend()
+            else:
+                ax.plot(tspan, momentums, color='orange')
+                # plt.plot(tspan, Vs, label='potential')
+                ax.set_ylabel("momentum", color='orange')
+                # ax.legend()
         return heating
         
     def heating_one_ion(self, tspan, T, y, freq=5e5*2*np.pi):
@@ -556,9 +575,9 @@ class trap_model:
                 E += (k0 * q / (d * 1e-3)).sum()
             return E
         p = self.rf_null_point(guess_x)
-        guess = np.array([[guess_x + (i - N_ions / 2 + 0.5) * 0.005, p[1], p[2]] for i in range(N_ions)]).flatten() + 0.001*np.random.uniform()
-        # bounds = [(guess_x-0.05, guess_x+0.05), (-0.02, 0.02), (0.5, 1)] * N_ions
-        return minimize(totol_energy, x0=guess).x.reshape((N_ions, 3))
+        guess = np.array([[guess_x + (i - N_ions / 2 + 0.5) * 0.005, 0, p[2]] for i in range(N_ions)]).flatten()
+        bounds = [(guess_x-0.05, guess_x+0.05), (-0.1, 0.1), (0.05, 0.2)] * N_ions
+        return minimize(totol_energy, x0=guess, bounds=bounds).x.reshape((N_ions, 3))
     
     def get_indices(self, use_sectors=None, point=None, top_nearest=None, paired=True, plot=False):
         if top_nearest is not None:
@@ -588,6 +607,7 @@ class trap_model:
         hessian = self.pseudo_hess(point) + (self.hess(point) * voltages[:, None, None]).sum(axis=0)
         if rotate is False:
             eig = np.array([hessian[0, 0], hessian[1, 1], hessian[2, 2]])
+            # print(eig)
             freq = (q * eig * 1e-6 / m) ** 0.5 / (2 * np.pi )
             return freq
         else:

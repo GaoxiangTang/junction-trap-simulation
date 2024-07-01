@@ -4,6 +4,22 @@ import matplotlib.pyplot as plt
 from scipy.interpolate import interpnd, RegularGridInterpolator
 import numpy as np
 from potential_initialization import *
+import plotly.graph_objects as go
+
+def mesh3d(mesh,**kwargs):
+    vertices = mesh.vertices
+    triangles = mesh.faces
+    x, y, z = vertices.T
+    I, J, K = triangles.T              
+    Xe = []
+    Ye = []
+    Ze = []
+    for T in vertices[triangles] :
+        Xe.extend([T[k%3][0] for k in range(4)]+[None])
+        Ye.extend([T[k%3][1] for k in range(4)]+[None])
+        Ze.extend([T[k%3][2] for k in range(4)]+[None])
+    return (go.Mesh3d(x=x,y=y,z=z,i=I,j=J,k=K,flatshading=True,showscale=False,**kwargs),)
+            #go.Scatter3d(x=Xe,y=Ye,z=Ze,mode='lines',line=dict(color='rgb(70,70,70)',width=1),name='')) 
 
 def potential_slicez(srange, stepsize, z, potential=None, interp=None, ax=None):
     xtick, ytick, ztick = get_field_point_ticks(srange, stepsize)
@@ -33,7 +49,7 @@ def potential_slicex(srange, stepsize, x, potential=None, interp=None, ax=None):
     slice = interp(points.reshape((int(points.size / 3), 3)))
     grid = np.meshgrid(ytick, ztick, indexing='ij')
     if ax is None:
-        cs = plt.contourf(grid[0], grid[1], slice.reshape(grid[0].shape), levels=30)
+        cs = plt.contourf(grid[0], grid[1], slice.reshape(grid[0].shape), levels=100)
         plt.colorbar(cs)
         plt.title("x=%.2f" % x)
         plt.xlabel('y')
@@ -51,9 +67,22 @@ def total_potential_slice(voltage, potential_basis, pseudo_potential, srange, st
     return potential_slicez(srange, stepsize, z, tp)
 
 def part(mesh, part_idx=0, ):
-    part_idx = np.array(part_idx).ravel()
-    part = trimesh.graph.split(mesh, False)[part_idx]
+    part_id = np.array(part_idx).ravel()
+    # part = trimesh.graph.split(mesh, False)[part_idx]
     # Create a new plot
+    electrodes = trimesh.graph.split(mesh,False)
+
+    scene = dict(aspectratio=dict(x=3,y=2,z=1),zaxis=dict(range=[0,0.1]),camera=dict(eye=dict(x=0,y=-1.5,z=3)))
+    layout = go.Layout(scene=scene,margin=dict(r=0,l=0,b=0,t=0), autosize=False)#,height=400)
+    data = []
+    for i in range(len(electrodes)):
+        data += mesh3d(electrodes[i],color='goldenrod' if i in part_id else 'grey',hoverinfo='name',name=str(i),opacity=1 if i in part_id else 0.5)
+    return go.Figure(data=data,layout=layout)
+
+
+def part0(mesh, part_idx=0):
+    part_id = np.array(part_idx).ravel()
+    part = trimesh.graph.split(mesh, False)[part_idx]
     figure = plt.figure()
     axes = figure.add_subplot(projection='3d')
 
